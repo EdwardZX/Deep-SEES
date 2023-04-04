@@ -330,6 +330,31 @@ class VraeAnalyzer:
         self.kmeans.labels_ = labels
         self.is_save = False
 
+    def re_multilayers_train(self,id_k,num_clustering):
+        df, df_msd, idx = myutils.load_data(self.path, self.filename_set)
+        re_id = np.where(self.kmeans.labels_ == id_k)[0]
+        data, _= myutils.data_processing(df.iloc[re_id], self.num_features, self.seq_len)
+        if self.is_range:
+            self.scalar = self.n_scale / np.mean(np.mean(np.abs(data), axis=0), axis=0)
+        else:
+            scalar = self.n_scale / np.mean(np.mean(np.abs(data)))
+            self.scalar = [scalar for i in range(self.num_features)]
+        data = data * self.scalar
+
+        vrae = self.vrae
+        dataset = TensorDataset(torch.from_numpy(data))
+        vrae.fit(dataset)
+        vrae.eval()
+        _, z_latent_total, _ = self._run_single_file(df)
+        z_latent = z_latent_total[1]  # unormal
+        z_latent_select = z_latent[re_id]
+        re_kmeans = KMeans(n_clusters=num_clustering, random_state=self.seed).fit(z_latent_select)
+        labels = -np.ones_like(self.kmeans.labels_)
+        labels[re_id] = re_kmeans.labels_
+        self.kmeans = re_kmeans
+        self.kmeans.labels_ = labels
+        self.is_save = False
+
     def plot_every_hist(self):
         for i in range(len(self.filename_set)):
             z, labels, centers,df_traj = self._load_each_file(i)
@@ -545,6 +570,8 @@ class VraeAnalyzer:
         # labels_total = np.array([])
         if not len(delta_t):
             xy_total,labels_total = self._reverse_mean_and_error(xy,labels)
+            t_total = np.hstack(
+                        [np.linspace(t-self.seq_len,t,1),t])
 
         else:
             t_idx_delete = []
@@ -553,14 +580,19 @@ class VraeAnalyzer:
                 if j == 0:
                     xy_total, labels_total = self._reverse_mean_and_error(xy[int(delta_t[j]):int(delta_t[j + 1]), :, :],
                                                                         labels[int(delta_t[j]):int(delta_t[j + 1])])
+                    t_total = np.hstack(
+                        [np.arange(t[int(delta_t[j])]-self.seq_len+1,t[int(delta_t[j])],1),t[int(delta_t[j]):int(delta_t[j + 1])]])
                     ##reverse
                 else:
                     xy_temp,labels_temp = self._reverse_mean_and_error(xy[int(delta_t[j]):int(delta_t[j + 1]), :,:],
                                                                  labels[int(delta_t[j]):int(delta_t[j + 1])]) ##reverse
+                    t_temp = np.hstack(
+                        [np.arange(t[int(delta_t[j])]-self.seq_len+1,t[int(delta_t[j])],1),t[int(delta_t[j]):int(delta_t[j + 1])]])
                     xy_total = np.vstack([xy_total,xy_temp])
                     labels_total = np.hstack([labels_total,labels_temp])
+                    t_total = np.hstack([t_total,t_temp])
             # print(len(t_idx_delete))
-            t = np.delete(t,t_idx_delete,0)
+            # t = np.delete(t,t_idx_delete,0)
             # z_similarity = np.delete(z_similarity,t_idx_delete,0)
         ####### similarity of z-latent #####
         # print(z_similarity.shape, xy_total.shape, t.shape)
@@ -569,17 +601,17 @@ class VraeAnalyzer:
             np.savetxt(self.result_path + '/' + 'output.csv',
                    xy_total,
                    delimiter=',', fmt='%10.8f')
-            # np.savetxt(self.result_path + '/' + 'output_similarity.csv',
-            #        z_similarity,
-            #        delimiter=',', fmt='%10.8f')
+            np.savetxt(self.result_path + '/' + 'output_similarity.csv',
+                   np.hstack((t.reshape(-1,1),z)),
+                   delimiter=',', fmt='%10.8f')
             np.savetxt(self.result_path + '/' + 'output_label.csv',
                        labels_total,
                        delimiter=',', fmt='%d')
             np.savetxt(self.result_path + '/' + 'output_txy.csv',
-                       np.hstack((t.reshape(-1,1),xy_total)),
+                       np.hstack((t_total.reshape(-1,1),xy_total)),
                        delimiter=',', fmt='%10.8f')
             self.is_save = True
-        return (z,labels), labels_total, centers,(xy_total,t)  #labels
+        return (z,labels), labels_total, centers,(xy_total,t_total)  #labels
 
 
     def _run_single_file(self,df):
@@ -762,6 +794,16 @@ class VraeAnalyzer:
 
         ######reverse window to filter pos####
         ###### output_off_xy
+        pos_label = np.linspace(-6,6,31)
+        norm_label_kernel = np.exp(-(pos_label) ** 2 / 2)
+        norm_label_kernel = np.ceil(norm_label_kernel / np.exp(-(2.5) ** 2 / 2)).astype(int)[1:]
+        norm_label_weight = np.ones(xy.shape[1],dtype='int64')
+        tau = np.min([norm_label_kernel.shape[0]//2, norm_label_weight.shape[0]//2])
+        res = np.min([norm_label_kernel.shape[0] - tau, norm_label_weight.shape[0]-tau])
+
+        norm_label_weight[norm_label_weight.shape[0]//2 - tau: norm_label_weight.shape[0]//2+res] = \
+        norm_label_kernel[norm_label_kernel.shape[0]//2 - tau: norm_label_kernel.shape[0]//2+res]
+
         if self.num_features == 3:
             raw_len = xy.shape[1] - 1 + xy.shape[0]
             reverse_list_x = [[] for i in range(raw_len)]
@@ -775,7 +817,9 @@ class VraeAnalyzer:
                     reverse_list_x[i + j].append(xy[i, j, 0])
                     reverse_list_y[i + j].append(xy[i, j, 1])
                     reverse_list_z[i + j].append(xy[i, j, 2])
-                    reverse_list_label[i + j].append(labels_raw[i, j])
+                    # reverse_list_label[i + j].append(labels_raw[i, j])
+                    reverse_list_label[i + j].extend(
+                        np.ones(norm_label_weight[j], dtype='int8') * labels_raw[i, j])
 
             ##########cal_mean and error#######
             mean_x = np.array([np.mean(i) for i in reverse_list_x])
@@ -783,9 +827,11 @@ class VraeAnalyzer:
             mean_z = np.array([np.mean(i) for i in reverse_list_z])
 
             mean_label = np.array([stats.mode(i)[0][0] for i in reverse_list_label])
+            
             OFFSET = int(xy.shape[1] / 2)
 
-            return np.vstack([mean_x[OFFSET:-OFFSET], mean_y[OFFSET:-OFFSET],mean_z[OFFSET:-OFFSET]]).T, np.array(mean_label[OFFSET:-OFFSET])
+            # return np.vstack([mean_x[OFFSET:-OFFSET], mean_y[OFFSET:-OFFSET],mean_z[OFFSET:-OFFSET]]).T, np.array(mean_label[OFFSET:-OFFSET])
+            return np.vstack([mean_x, mean_y,mean_z]).T, np.array(mean_label)
 
         else:
             raw_len = xy.shape[1]-1+xy.shape[0]
@@ -798,7 +844,9 @@ class VraeAnalyzer:
                 for j in range(xy.shape[1]):
                     reverse_list_x[i+j].append(xy[i,j,0])
                     reverse_list_y[i+j].append(xy[i,j,1])
-                    reverse_list_label[i+j].append(labels_raw[i,j])
+                    # reverse_list_label[i+j].append(labels_raw[i,j])
+                    reverse_list_label[i + j].extend(
+                        np.ones(norm_label_weight[j], dtype='int8') * labels_raw[i, j])
 
             ##########cal_mean and error#######
             mean_x = np.array([np.mean(i) for i in reverse_list_x])
@@ -872,8 +920,8 @@ class VraeAnalyzer:
             # np.savetxt('./result/15min_2_smooth_label.csv', self.kmeans.labels_, fmt='%d', delimiter=',')
 
 
-
-            return np.vstack([mean_x[OFFSET:-OFFSET],mean_y[OFFSET:-OFFSET]]).T, np.array(mean_label[OFFSET:-OFFSET])
+            # return np.vstack([mean_x[OFFSET:-OFFSET],mean_y[OFFSET:-OFFSET]]).T, np.array(mean_label[OFFSET:-OFFSET])
+            return np.vstack([mean_x,mean_y]).T, np.array(mean_label)
 
     def _get_slice_window(self,val,window=8,a=0.25):
         # num * 2
