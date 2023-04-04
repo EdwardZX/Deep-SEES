@@ -10,6 +10,6 @@ Matlab Data Preprocessing (processing) (only need to be processed once):
 1.2 Use the get_data_2d/3d/2d_adding_information scripts
 - Input file location path, output file save location save_path, file name name_set, and whether to eliminate spatial correlation.
 
-
+Finally run main_DeepSEES.ipynb
 
 
