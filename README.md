@@ -4,6 +4,7 @@ This project is based on PyTorch, and colab.
 Matlab Data Preprocessing (preprocessing Folder):
 
 1.1 Use the transform_data (name, xy, polar(optional)) function to save the xy and polar:
+- xy is the tracks (Time x Dimension x num), polar is the additional information (Time x num)
 - Make sure the length of the xy and polar files are equal
 - addpath('./MyUtils/MyTrajectoryPara/'); addpath('./MyUtils/'); 
 
