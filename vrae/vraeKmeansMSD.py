@@ -151,6 +151,103 @@ def _assert_no_grad(tensor):
         "nn criterions don't compute the gradient w.r.t. targets - please " \
         "mark these tensors as not requiring gradients"
 
+
+def get_ffnn(input_size, output_size, nn_desc, dropout_rate, bias=True):
+    """
+    function to get a feed-forward neural network with the given description
+    :param input_size: int, input dimension
+    :param output_size: int, output dimension
+    :param nn_desc: list of lists or None, each inner list defines one hidden
+            layer and has 2 elements: 1. int, the hidden dim, 2. str, the
+            activation function that should be applied (see dict nonlinears for
+            possible options)
+    :param dropout_rate: float,
+    :param bias: bool, whether a bias is used in the layers
+    :return: torch.nn.Sequential, the NN function
+    """
+    nonlinears = {
+        'tanh': torch.nn.Tanh,
+        'relu': torch.nn.ReLU,
+        'gelu': torch.nn.GELU
+    }
+
+    if nn_desc is None:
+        layers = [torch.nn.Linear(input_size, output_size, bias=bias)]
+    else:
+        layers = [torch.nn.Linear(input_size, nn_desc[0][0], bias=bias)]
+        if len(nn_desc) > 1:
+            for i in range(len(nn_desc)-1):
+                layers.append(nonlinears[nn_desc[i][1]]())
+                layers.append(torch.nn.Dropout(p=dropout_rate))
+                layers.append(torch.nn.Linear(nn_desc[i][0], nn_desc[i+1][0],
+                                              bias=bias))
+        layers.append(nonlinears[nn_desc[-1][1]]())
+        layers.append(torch.nn.Dropout(p=dropout_rate))
+        layers.append(torch.nn.Linear(nn_desc[-1][0], output_size, bias=bias))
+    return torch.nn.Sequential(*layers)
+
+class FFNN(torch.nn.Module):
+    """
+    Implements feed-forward neural networks with tanh applied to inputs and the
+    option to use a residual NN version (then the output size needs to be a
+    multiple of the input size or vice versa)
+    """
+
+    def __init__(self, input_size, output_size, nn_desc, dropout_rate=0.0,
+                 bias=True, residual=True, masked=False):
+        super().__init__()
+
+        # create feed-forward NN
+        in_size = input_size
+        if masked:
+            in_size = 2 * input_size
+        self.masked = masked
+        self.ffnn = get_ffnn(
+            input_size=in_size, output_size=output_size,
+            nn_desc=nn_desc, dropout_rate=dropout_rate, bias=bias
+        )
+
+        if residual:
+            # print('use residual network: input_size={}, output_size={}'.format(
+            #     input_size, output_size))
+            if input_size <= output_size:
+                if output_size % input_size == 0:
+                    self.case = 1
+                    self.mult = int(output_size / input_size)
+                else:
+                    raise ValueError('for residual: output_size needs to be '
+                                     'multiple of input_size')
+
+            if input_size > output_size:
+                if input_size % output_size == 0:
+                    self.case = 2
+                    self.mult = int(input_size / output_size)
+                else:
+                    raise ValueError('for residual: input_size needs to be '
+                                     'multiple of output_size')
+        else:
+            self.case = 0
+
+    def forward(self, nn_input, mask=None):
+        if self.masked:
+            assert mask is not None
+            # out = self.ffnn(torch.cat((F.gelu(nn_input), mask), 1))
+            out = self.ffnn(torch.cat((nn_input, mask), 1))
+        else:
+            # out = self.ffnn(F.gelu(nn_input))
+            out = self.ffnn(nn_input)
+
+        if self.case == 0:
+            return out
+        elif self.case == 1:
+            # a = nn_input.repeat(1,1,self.mult)
+            identity = nn_input.repeat(1, 1, self.mult)
+            return identity + out
+        elif self.case == 2:
+            identity = torch.mean(torch.stack(nn_input.chunk(self.mult, dim=-1)),
+                                  dim=0)
+            return identity + out
+
 class VRAE(BaseEstimator, nn.Module):
     """Variational recurrent auto-encoder. This module is used for dimensionality reduction of timeseries
 
@@ -176,7 +273,9 @@ class VRAE(BaseEstimator, nn.Module):
                  batch_size=32, learning_rate=0.005, block='LSTM',
                  n_epochs=5, dropout_rate=0., optimizer='Adam', loss='MSELoss',
                  cuda=False, print_every=100, clip=True, max_grad_norm=5, dload='.', 
-                 K=20,kmeans_weight = 5e-3):
+                 K=20,kmeans_weight = 5e-3, default_enc_nn = ((50, 'gelu'), (50, 'gelu')),
+                 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu"),
+                 n_s = 6, loss_2 = None):
 
         super(VRAE, self).__init__()
 
@@ -199,17 +298,34 @@ class VRAE(BaseEstimator, nn.Module):
                                dropout=dropout_rate,
                                block=block)
 
+        self.cencoder = FFNN(input_size=hidden_size+n_s, output_size = hidden_size,
+                        nn_desc=default_enc_nn, dropout_rate= dropout_rate, residual=False)
+
         self.lmbd = Lambda(hidden_size=hidden_size,
                            latent_length=latent_length)
 
-        self.decoder = Decoder(sequence_length=int(sequence_length),
-                               batch_size = batch_size,
+        self.emb = Decoder(sequence_length=int(sequence_length),
+                               batch_size=batch_size,
                                hidden_size=hidden_size,
                                hidden_layer_depth=hidden_layer_depth,
-                               latent_length=latent_length,
+                               latent_length=hidden_size,
                                output_size=number_of_features,
                                block=block,
                                dtype=self.dtype)
+
+        self.cdecoder = Decoder(sequence_length=int(sequence_length),
+                               batch_size = batch_size,
+                               hidden_size=hidden_size,
+                               hidden_layer_depth=hidden_layer_depth,
+                               latent_length=latent_length + n_s,
+                               output_size=number_of_features,
+                               block=block,
+                               dtype=self.dtype) # y0
+
+        # self.emb = FFNN(input_size=hidden_size, output_size = number_of_features * sequence_length,
+        #                 nn_desc=default_enc_nn, dropout_rate= dropout_rate) #y0
+
+        self.condition_emb = nn.Linear(n_s,sequence_length*n_s)
 
         self.sequence_length = sequence_length
         self.hidden_size = hidden_size
@@ -227,10 +343,14 @@ class VRAE(BaseEstimator, nn.Module):
 
         self.K = K
         self.weight = kmeans_weight
+        self.N_s =  n_s
         # self.F_kmeansT = nn.init.orthogonal_(torch.randn(self.K,self.batch_size, requires_grad=False)).type(self.dtype) #F (BxK) s.t. FI F = I
+        self.device = device
+        self.loss_2 = loss_2
 
         if self.use_cuda:
             self.cuda()
+
 
         if optimizer == 'Adam':
             self.optimizer = optim.Adam(self.parameters(), lr=learning_rate)
@@ -246,6 +366,8 @@ class VRAE(BaseEstimator, nn.Module):
             #self.loss_fn = nn.MSELoss(size_average=False)
             self.loss_fn = nn.MSELoss(reduction='sum')
 
+
+
     def __repr__(self):
         return """VRAE(n_epochs={n_epochs},batch_size={batch_size},cuda={cuda})""".format(
                 n_epochs=self.n_epochs,
@@ -259,14 +381,19 @@ class VRAE(BaseEstimator, nn.Module):
         :param x:input tensor
         :return: the decoded output, latent vector
         """
-        cell_output = self.encoder(x)
-
+        cell_output = self.encoder(x) # B x H
+        y0 = self.emb(cell_output) # L X B X D
+        # y0 = torch.ones(40,1,2).to(self.device)
+        eps = 1e-6
+        z_c = torch.log10(self._condition_fft(y0)[:,:self.N_s]+eps)
+        cell_input = torch.concat([cell_output,z_c],dim=-1)
+        cell_output = cell_output + self.cencoder(cell_input) # Res-block
         latent = self.lmbd(cell_output) # |y0-y1| + |x-y0|
-
-        x_decoded = self.decoder(latent) # y0 -> msd -> z += z_alpha (N x B x 5) -> nn.concate, decoder 2
-
-        return x_decoded, latent
-
+        z_latent = torch.concat([latent,z_c],dim=-1) # B X (hidden+k)
+        x_decoded = self.cdecoder(z_latent) # y0 -> msd -> z += z_alpha (N x B x 5) -> nn.concate, decoder 2
+        self.y0 = y0
+        self.z_c = z_c
+        return x_decoded, z_latent
 
     def _rec(self, x_decoded, x, loss_fn, z):
         """
@@ -290,11 +417,51 @@ class VRAE(BaseEstimator, nn.Module):
         HTH = torch.matmul(z,z.T) #H (c x B) z (B x c)
         FTHTHF = torch.matmul(F.T,torch.matmul(HTH,F))
         kmeans_loss = torch.trace(HTH)-torch.trace(FTHTHF)
-        
         kl_loss = -0.5 * torch.sum(1 + latent_logvar - latent_mean.pow(2) - latent_logvar.exp())
-        recon_loss = loss_fn(x_decoded, x)
+        eps = 1e-16
+        recon_loss_val = loss_fn(x_decoded, x)
 
-        return kl_loss + recon_loss + self.weight*kmeans_loss, recon_loss, kl_loss, kmeans_loss
+        if self.loss_2 is not None:
+            recon_loss = torch.sum((torch.sqrt((x - self.y0) ** 2 + eps) +
+                   torch.sqrt((self.y0 - x_decoded) ** 2 + eps)
+                   ) ** 2)
+        else:
+            recon_loss = loss_fn(x_decoded, self.y0) + loss_fn(x, self.y0)
+
+        return kl_loss + recon_loss + self.weight*kmeans_loss, recon_loss_val, kl_loss, kmeans_loss
+
+    def _autocorrFFT(self,x):
+        # Tensor (L,B,D)
+        N = x.shape[0]
+        F = torch.fft.fft(x, n=2 * N,dim = 0)  # 2*N because of zero-padding
+        PSD = F * torch.conj(F)
+        res = torch.fft.ifft(PSD, dim=0)
+        res = (res[:N]).real  # now we have the autocorrelation in convention B
+        n = N * torch.ones(N).to(self.device) - torch.arange(0, N).to(self.device)  # divide res(m) by (N-m)
+        n = n.repeat(res.shape[1],res.shape[2],1).permute(2,0,1).contiguous()
+        return res / n  # this is the autocorrelation in convention A
+
+    def _condition_fft(self,r):
+        N = r.shape[0]
+        n_divide = N - torch.arange(0, N).to(self.device)
+        D = torch.sum(r**2,dim=-1)
+        # D = np.append(D, 0)
+
+        S1 = (2 * torch.sum(D,dim=0) - torch.cumsum(
+            torch.concat((torch.zeros(1, r.shape[1]).to(self.device), D[0:-1]), dim=0) +
+            torch.flip(
+                torch.concat((D[1:], torch.zeros(1, r.shape[1]).to(self.device)), dim=0),dims=(0,)),dim=0))
+
+        S1 = S1 / n_divide.repeat(r.shape[1], 1).T
+
+        S2 = self._autocorrFFT(r)
+        S2 = torch.sum(S2, dim=-1)
+
+        output = S1 - 2 * S2
+
+        return output[1:].permute(1, 0).contiguous()
+
+
 
     def compute_loss(self, X):
         """
@@ -307,6 +474,7 @@ class VRAE(BaseEstimator, nn.Module):
         x = Variable(X[:,:,:].type(self.dtype), requires_grad = True)
 
         x_decoded, z = self(x)
+        z = z[:,:self.latent_length]
         # y = x.detach()[int(self.sequence_length/2):,:]#[int(self.sequence_length/2),:,:]
 
 
@@ -348,7 +516,6 @@ class VRAE(BaseEstimator, nn.Module):
 
             if self.clip:
                 torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm = self.max_grad_norm)
-
 
 
 
@@ -445,15 +612,18 @@ class VRAE(BaseEstimator, nn.Module):
     def _batch_transform(self, x):
         """
         Passes the given input tensor into encoder and lambda function
-
         :param x: input batch tensor
         :return: intermediate latent vector
         """
-        return self.lmbd(
-                    self.encoder(
-                        Variable(x.type(self.dtype), requires_grad = False)
-                    )
-        ).cpu().data.numpy()
+        x = Variable(x.type(self.dtype), requires_grad=False)
+        _, z = self(x)
+
+        return z.cpu().data.numpy()
+        # return self.lmbd(
+        #             self.encoder(
+        #                 Variable(x.type(self.dtype), requires_grad = False)
+        #             )
+        # ).cpu().data.numpy()
 
     def _batch_reconstruct(self, x):
         """
@@ -470,7 +640,9 @@ class VRAE(BaseEstimator, nn.Module):
 
 
     def _batch_decoded(self,latent):
-        return self.decoder(
+        # latent = torch.concat([latent,self.z_c],dim=-1)
+        # z_c
+        return self.cdecoder(
                 Variable(latent.type(self.dtype), requires_grad=False)
         ).cpu().data.numpy()
 
