@@ -20,6 +20,7 @@ from scipy import stats
 from sklearn import metrics
 from mpl_toolkits.mplot3d import Axes3D
 from matplotlib import cm
+
 import copy
 
 
@@ -40,7 +41,7 @@ class VraeAnalyzer:
 
     def __init__(self,vrae,path,filename_set,num_features=2,seq_len=30,n_cluster=5,
                  brownian_filter=(0.1,0.05),alpha_ROI_select=(-np.inf,np.inf),Reconstruct_error_select=(0,2),
-                 seed = 0,is_range = False ,n_scale = 3):
+                 seed = 0,is_range = False ,n_scale = 3, n_seg = None):
         self.num_features = num_features
         self.seq_len = seq_len
 
@@ -57,6 +58,7 @@ class VraeAnalyzer:
         self.xy_2D = False
         self.xy_3D = False
         self.is_save = False
+        self.n_seg = n_seg
 
 
         self.path = path
@@ -89,8 +91,8 @@ class VraeAnalyzer:
         df, df_msd, idx = myutils.load_data(self.path,self.filename_set)
         ### get data and brownian filter
         c_output_total,z_latent_total,data_raw_total = self._run_single_file(df)
-        z_latent = z_latent_total[1] # unormal 
-        # z_latent = z_latent_total[1]
+        z_latent = z_latent_total[1] # normal
+        # z_latent = z_latent_total[0] # unormal
         z_norm = np.linalg.norm(z_latent_total[0], axis=1)
         if len(z_norm.shape) <= 1:
             z_norm = z_norm[:, None]
@@ -375,7 +377,7 @@ class VraeAnalyzer:
         for i in range(len(self.filename_set)):
             z, labels, centers,(xy,t) = self._load_each_file(i,is_filtering)
 
-            if self.num_features == 3:
+            if self.num_features == 3 and not self.xy_2D:
                 myutils.plot_single_trajectory_3d(xy, t,labels, centers, lo = lo,steps_set=step)
             elif self.num_features == 3 and self.iso and self.xy_2D:
                 myutils.plot_single_trajectory(xy, t, labels, centers,lo=lo,steps_set=step,sz=sz,is_equal = is_equal)
@@ -659,18 +661,20 @@ class VraeAnalyzer:
 
         return (output, output_norm), (z_run, z_norm), (data, data_norm) #
 
-    def _get_brownian_filter(self,df_msd):
+    def _get_brownian_filter(self,df_msd,draw=None):
         alpha = df_msd.iloc[:, self.num_features+1].values
         y_error = df_msd.iloc[:, self.num_features+2].values
+        if draw is not None:
+            plt.hist(alpha, bins=200)
+            plt.title('alpha')
+            plt.show()
 
-        plt.hist(alpha, bins=200)
-        plt.title('alpha')
-        plt.show()
+            plt.hist(y_error, bins=200)
 
-        plt.hist(y_error, bins=200)
+            plt.title('polynomial fitting error')
+            plt.show()
 
-        plt.title('polynomial fitting error')
-        plt.show()
+
         ######alpha 0.9-1.1 think it's quiet brownian
         idx_alpha = (alpha > 1 - self.brownian_filter[0]) & (alpha < 1 + self.brownian_filter[0])
         idx_model_error = y_error < self.brownian_filter[1]
@@ -736,10 +740,6 @@ class VraeAnalyzer:
             answer = xy
 
         return answer
-
-
-
-
 
     def _get_alpha_ROI_select_filter(self,df_msd):
         alpha = df_msd.iloc[:, self.num_features+1].values
@@ -826,9 +826,11 @@ class VraeAnalyzer:
             mean_y = np.array([np.mean(i) for i in reverse_list_y])
             mean_z = np.array([np.mean(i) for i in reverse_list_z])
 
-            mean_label = np.array([stats.mode(i)[0][0] for i in reverse_list_label])
-            
+            mean_label = np.array([stats.mode(i, keepdims=True)[0][0] for i in reverse_list_label])
             OFFSET = int(xy.shape[1] / 2)
+            if self.n_seg is not None:
+                mean_label = self._merge_outliers(mean_label, seg=10)
+                mean_label = self._merge_outliers(mean_label, seg=self.n_seg)
 
             # return np.vstack([mean_x[OFFSET:-OFFSET], mean_y[OFFSET:-OFFSET],mean_z[OFFSET:-OFFSET]]).T, np.array(mean_label[OFFSET:-OFFSET])
             return np.vstack([mean_x, mean_y,mean_z]).T, np.array(mean_label)
@@ -854,73 +856,19 @@ class VraeAnalyzer:
             mean_y = np.array([np.mean(i) for i in reverse_list_y])
             # std_y = np.array([np.std(i) for i in reverse_list_y])
 
-            mean_label = np.array([stats.mode(i)[0][0] for i in reverse_list_label])
+            mean_label = np.array([stats.mode(i, keepdims=True)[0][0] for i in reverse_list_label])
+            # a = stats.mode(reverse_list_label[0], keepdims=False)
             # plt.plot(mean_label)
             # plt.show()
 
-
             OFFSET = int(xy.shape[1] / 2)
-            # std_t = (np.sqrt(std_x**2 +  std_y **2)/2).T
-            # std_t = std_t[OFFSET:-OFFSET]
-            # plt.plot(std_t)
-            # plt.xlim([40000,56000])
-            # plt.ylim([0,0.01])
-            # plt.show()
-            #52800
-            # lo = 51000
-            # hi = 54000
-            # window_size = 12
-            # a = 0.25
-            # mean_x_plot = mean_x[lo:hi]
-            # mean_x_plot_filter = self._get_slice_window(mean_x_plot,window_size,a)
-            # mean_y_plot = mean_y[lo:hi]
-            # mean_y_plot_filter = self._get_slice_window(mean_y_plot, window_size,a)
-            # # std_x_plot = std_x[lo:hi]
-            # # std_y_plot = std_y[lo:hi]
-            # pos = self.pos[lo:hi,:]
-            # labels_plot = mean_label[lo:hi]
-            #
-            # t = [i for i in range(len(mean_x_plot))]
-            # # plt.plot(mean_x)
-            #
-            #
-            # # plt.errorbar(t,mean_x_plot,yerr=std_x_plot)
-            # plt.subplot(211)
-            # plt.plot(pos[:,0])
-            # plt.plot(mean_x_plot)
-            #
-            #
-            # # plt.plot(mean_x_plot_filter[1:]-mean_x_plot_filter[:-1])
-            # # plt.plot(mean_x_plot_filter)
-            # # plt.show()
-            # plt.subplot(212)
-            # plt.plot(labels_plot)
-            #
-            # plt.show()
-            #
-            # # plt.plot(mean_x,std_x)
-            # # plt.errorbar(t,mean_y_plot,yerr=std_y_plot)
-            # plt.subplot(211)
-            # plt.plot(pos[:, 1])
-            # plt.plot(mean_y_plot)
-            # # plt.plot(std_y_plot)
-            # # plt.plot(mean_y_plot_filter)
-            # # plt.plot(mean_y_plot_filter[1:]-mean_y_plot_filter[:-1])
-            # # plt.show()
-            # plt.subplot(212)
-            # plt.plot(labels_plot)
-            # plt.show()
-
-
-
-
-            # t_save = np.array([i for i in range(len(mean_x))])
-            # id = np.zeros(len(mean_x))
-            # np.savetxt('./result/15min_2_smooth.csv', np.vstack([id,t_save,mean_x,mean_y]).T, fmt='%7f',delimiter=',')
-            # np.savetxt('./result/15min_2_smooth_label.csv', self.kmeans.labels_, fmt='%d', delimiter=',')
-
-
+            if self.n_seg is not None:
+                mean_label = self._merge_outliers(mean_label, seg=10)
+                mean_label = self._merge_outliers(mean_label, seg=self.n_seg)
+            # mean_label = self._merge_outliers(mean_label,seg=10)
+            # mean_label = self._merge_outliers(mean_label,seg=30)
             # return np.vstack([mean_x[OFFSET:-OFFSET],mean_y[OFFSET:-OFFSET]]).T, np.array(mean_label[OFFSET:-OFFSET])
+            # self._merge_outliers(np.array([0,0,0,0,0,0,0,0,0,0,1,1,1,0,0,0,0,0,0,1,1,0,0,0,0,0,0]),seg=5)
             return np.vstack([mean_x,mean_y]).T, np.array(mean_label)
 
     def _get_slice_window(self,val,window=8,a=0.25):
@@ -931,6 +879,29 @@ class VraeAnalyzer:
             X[hi] = a*np.mean(val[lo:max(hi,1)]) + (1-a)*X[max(lo-1,0)] #one order filter
 
         return X
+
+
+    def _merge_outliers(self,labels, seg = 10):
+        labels_merge = labels.copy()
+        deltaL = np.hstack([1,np.diff(labels),1])
+        idx = np.where(deltaL !=0)[0]
+        dt = idx[1:]-idx[:-1]
+        dt_merge = np.where(dt <= seg)[0].astype(int)
+        for i in dt_merge:
+            lo = idx[i]
+            hi = idx[i + 1]
+            d = (lo + hi)//2
+            #
+            # labels_merge[lo:d] = labels[max(lo-1,0)]
+            tmp_lo = labels[max(lo - seg // 2, 0):max(lo, 1)]
+            tmp_hi = labels[min(hi, len(labels)-1):min(hi+seg // 2, len(labels))]
+            labels_merge[lo:d] = np.array([stats.mode(tmp_lo,keepdims=True)[0][0]])
+            labels_merge[d:hi] = np.array([stats.mode(tmp_hi,keepdims=True)[0][0]])
+            # labels_merge[lo:d] = labels[min(lo - seg // 2, 0):min(lo - 1, 0)]
+            # labels_merge[d:hi] = labels[min(hi, len(labels)-1)]
+        return labels_merge
+
+
 
 
 

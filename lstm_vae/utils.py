@@ -20,13 +20,15 @@ def load_data(path,filename_set):
     idx = [0]
     for filename in filename_set:
         filename = path + filename + '.csv'
-        df = df.append(pd.read_csv(filename, header=None))
+        # df = df.append(pd.read_csv(filename, header=None))
+        df = pd.concat([df, pd.read_csv(filename, header=None)])
         idx.append(df.shape[0])
 
     df_msd = pd.DataFrame()
     for filename in filename_set:
         filename = path + filename + '_is_brownian' + '.csv'
-        df_msd = df_msd.append(pd.read_csv(filename, header=None))
+        # df_msd = df_msd.append(pd.read_csv(filename, header=None))
+        df_msd = pd.concat([df_msd, pd.read_csv(filename, header=None)])
 
     return df, df_msd, idx
 
