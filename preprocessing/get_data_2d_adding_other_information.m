@@ -1,34 +1,36 @@
 function get_data_2d_adding_other_information()
+%% path and filename
 path = './data/';
 save_path = './data/lstm_vae';
-rand('seed',25);
 name_set = {'Test'};
 
-params = struct('dt',1,'baseline',0,'window',90); %final get 90 frame data;
+%% parameters setting
+moving_window = 30; % history length L
+is_del_spatial_iso = 1; % is focus on local shape
+is_del_adding_iso = 0; %0
+
+%% brownian mask setting default
+L_msd = 90; n_lags = 8; %default L_msd with 90 neighbors and tau = 8
+params = struct('dt',1,'baseline',0,'window',L_msd);
 factory = ParamsFactory();
-params.factory =  factory.get_params_factory({'msd',8});
+params.factory =  factory.get_params_factory({'msd',n_lags});
 
-is_del_spatial_iso = 1;
-is_del_adding = 0; %0
-
+%% running
 for m = 1:numel(name_set)
     name = name_set(m);
     adding_information = load([path,name{:},'.mat']).information;
     tj = get_value(path,name,params,'not_show'); %% if (xy, v ,theta) lost the first head
-    moving_window=30;
     if is_del_spatial_iso
         [t,xy,pos,res] = get_slice_t(tj,moving_window,is_del_spatial_iso);
     else
         [t,xy,pos] = get_slice_t(tj,moving_window,is_del_spatial_iso);
     end
     y_msd = get_slice_msd_value(tj,moving_window,params.window);
-
-    pos = arrayfun(@(m) adding_pos(pos{m},adding_information{m},is_del_adding),1:numel(pos),...
+    
+    pos = arrayfun(@(m) adding_pos(pos{m},adding_information{m},is_del_adding_iso),1:numel(pos),...
         'UniformOutput',false);
-    polar = get_slice_adding_value(adding_information,moving_window,is_del_adding);
+    polar = get_slice_adding_value(adding_information,moving_window,is_del_adding_iso);
     data_set = cat_value(t,pos,xy,polar);
-    %data_set = [data_set,label_set(m)*ones(size(data_set,1),1)];
-    %%add label
     %% save
     if is_del_spatial_iso
         str_name = [name{:},'_iso'];
@@ -41,7 +43,7 @@ for m = 1:numel(name_set)
         data_set = cat_value(t,pos,y_msd);
         csvwrite(fullfile(save_path,[str_name,'_is_brownian.csv']),data_set);
     end
-
+    
 end
 
 end
@@ -97,12 +99,10 @@ else
             size(tj.trajs{m},1),1),...
             (1:numel(tj.trajs))','UniformOutput',false');
     end
-
-
+    
+    
 end
 end
-
-
 
 function y= get_slice_msd_value(tj,window,msd_window)
 y = arrayfun(@(m) (get_mean_single_slices_msd(tj.trajectory_params{m}.msd,window,...
@@ -110,7 +110,6 @@ y = arrayfun(@(m) (get_mean_single_slices_msd(tj.trajectory_params{m}.msd,window
     (1:numel(tj.trajectory_params))','UniformOutput',false);
 
 end
-
 
 
 function result = get_mean_single_slices_msd(val,window,msd_window)
@@ -153,21 +152,7 @@ result = mat2cell([alpha,y_error],ones(size(alpha,1),1));
 end
 
 
-
 function [slices,varargout] = get_single_slices(val,window,is_del_spatial,varargin)
-%     if nargin >= 3
-%         padding = varargin{1};
-%         if padding-size(val,1) <= 0
-%            val = val(end-padding+1:end,:);
-%         else
-%             val = [zeros(padding-size(val,1),size(val,2));val];
-%         end
-%         %padding = varargin{1};
-%         val = [zeros(padding-size(val,1),size(val,2));val];
-%         %% do padding
-%         %val = val(end-padding,end,:);
-%     end
-
 
 tau = window-1;
 idx = (1:(size(val,1)-tau))' + [0,tau];
@@ -175,24 +160,19 @@ if nargin == 5
     % special for t xy
     % t
     slices = arrayfun(@(lo,hi) max(val(lo:hi,varargin{2})),idx(:,1),idx(:,2));
-    %slices.xy = arrayfun(@(lo,hi) val(lo:hi,varargin{2})-val(lo,varargin{2}),idx(:,1),idx(:,2),...
-    % 'UniformOutput',false');
-    %xy
-
-    %func = @(lo,hi) val(hi,2:3) - val(lo,2:3);
     f_val = smooth_traj(val);
-        
-        if is_del_spatial 
+    
+    if is_del_spatial
         varargout{1} = arrayfun(@(lo,hi) traj_rotation(val(lo:hi,2:3)-f_val(lo,2:3)),idx(:,1),idx(:,2),...
             'UniformOutput',false');
         varargout{2} = arrayfun(@(lo) f_val(lo,2:3),idx(:,1),...
             'UniformOutput',false');
-        else
+    else
         varargout{1} = arrayfun(@(lo,hi) val(lo:hi,2:3),idx(:,1),idx(:,2),...
-            'UniformOutput',false');   
-         varargout{2} = arrayfun(@(lo) val(lo,2:3),idx(:,1),...
             'UniformOutput',false');
-        end
+        varargout{2} = arrayfun(@(lo) val(lo,2:3),idx(:,1),...
+            'UniformOutput',false');
+    end
     % rotation
     if is_del_spatial
         varargout{3} = arrayfun(@(lo,hi) traj_rotation(val(lo:hi,2:3)-f_val(lo,2:3),2),idx(:,1),idx(:,2),...
@@ -203,7 +183,7 @@ else
         slices = arrayfun(@(lo,hi) val(lo:hi,:)-val(lo),idx(:,1),idx(:,2),...
             'UniformOutput',false');
     else
-      slices = arrayfun(@(lo,hi) val(lo:hi,:),idx(:,1),idx(:,2),'UniformOutput',false');  
+        slices = arrayfun(@(lo,hi) val(lo:hi,:),idx(:,1),idx(:,2),'UniformOutput',false');
     end
 end
 
@@ -219,35 +199,24 @@ for m = 1:size(X,2)
 end
 end
 
-
-
 function xy = traj_rotation(xy,varargin)
 
 
 f_xy = smooth_traj(xy);
 p = f_xy(end,:)-f_xy(1,:);
-% p = xy(end,:)-xy(1,:);
 pos = 2*(det([p;1,0])>0)-1;
-%p = xy(end,:)-xy(1,:);
 theta = pos * acos(sum(p.*[1,0])/sqrt(sum(p.^2)));
 T = [cos(theta),sin(theta);-sin(theta),cos(theta)];
-%  plot(xy(:,1),xy(:,2))
-%  hold on
 
 % xy = denoise_guassian(xy);
 
 xy = xy * T;
-% plot(xy(:,1),xy(:,2))
-%  hold off
 
 %
 [~,idx_max] = max(abs(xy(:,2)));
 flag = 2*(xy(idx_max,2)>0)-1;
 xy(:,2) = flag*xy(:,2);
 
-% plot(xy(:,1),xy(:,2))
-%  hold off
-% disp('finished')
 
 if nargin > 1
     xy = [theta,flag];
@@ -267,31 +236,12 @@ else
 end
 end
 
-function y = denoise_guassian(x)
-%every mention denoise
-[rows,cols] = size(x);
-y = zeros(size(x));
-for col = 1:cols
-    x_dft = fft(x(:,col));
-    %     x_dft([1])=0;
-    x_dft([1,2,3,4,rows-2,rows-1,rows])=0;
-    %     x_dft([1,2,3,rows-1,rows]) = 0; %keep low freq part
-    %     plot(abs(x_dft))
-    y(:,col) = x(:,col)-ifft(x_dft);
-    % y(:,col) = ifft(x_dft);
-end
-% plot(x(:,1),x(:,2))
-% hold on
-% plot(y(:,1),y(:,2));
-% hold off
-end
-
 
 function df = cat_value(t,pos,varargin)
 h=0;N = numel(varargin{1});
 df= [];
 for n = 1:N
-
+    
     val_total=[];
     for k = 1:numel(varargin{1}{n})
         %k_max = numel(varargin{m}{n});
